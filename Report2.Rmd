@@ -1,0 +1,354 @@
+---
+title: "Predicting Workout Form Using Machine Learning"
+author: "Christopher Campbell"
+date: "March 23, 2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, results="hide", echo=TRUE, cache=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(Hmisc)
+library(GGally)
+library(e1071)
+
+```
+
+```{r cache=TRUE}
+
+load("variables.RData")
+
+my_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+my_url2 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+download.file(my_url, "training")
+download.file(my_url2, "testing")
+
+
+testing <- read.csv("testing")
+training <- read.csv("training")
+
+## I subsequently move testing and training into the data folder above;
+## this is a simple way to organize my git.ignore file
+```
+
+# Introduction
+
+In this paper we analyse the Weight Lifting Exercise Dataset (WLE) from Groupware-LES. This data was collected
+by taking measurements of weight lifters doing an exercise in 5 different ways (the variable "classe" encodes
+these). The measurements were obtained using gyroscopes on the arm, the forearm, the waist, and a dumbbell. 
+
+# Data Preparation
+
+We first prepare the data for analysis by creating a training, a test, and a validation set. The data is of medium
+size with ~20,000 observations. However, the goal of this analysis is to produce a good estimate of the 
+out-of-sample error rate for 20 samples, per the course requirements of Johns Hopkins University's Intro to Machine
+Learning. Therefore, while we treat our test set produced in this analysis as truly
+an untouched sample of the data, we won't be excessively concerned about our algorithm's performance on the test set.
+The implication, then, is that we won't need a huge test set - we break it up here into 80% training (further broken
+into 60% training and 20% validation), and 20% testing.
+
+```{r cache=TRUE}
+set.seed(1233)
+fortest <- createDataPartition(training$classe,p=.2,list=FALSE)
+test <- training[fortest,]
+
+
+pretrain <- training[-fortest,]
+  
+forvalidation <- createDataPartition(pretrain$classe,p=.25,list=FALSE) #.25*.8=.2 obvi
+train <- pretrain[-forvalidation,]
+validation <- pretrain[forvalidation,]
+
+```
+
+# Exploratory Data Analysis
+
+We explore the pretrain object, which is our undifferentiated training set. The data has 15,695 observations with
+160 variables. From the user_name field, we see that 6 individuals participated in producing the data. Thus,
+6 individuals repeated 5 different forms of each exercise. Some information is provided which we will not be 
+concerned about including time_stamps and "window" variables, which have little variation.
+
+One immediate observation is that the
+variables for each of the bands include a decomposition of role, pitch, yaw, and acceleration many other components
+including directional information and descriptive statistics about that information. Most of the descriptive statistics are not tabulated for each observation so these can be automatically thrown away (in this case, the mean, standard deviation, kurtosis, and skewness are not sufficient statistics for our class probabilities in the classification models below).
+
+If we look at a table of our outcome variable, we notice that class A is over-represented, which may have
+to be dealt with by penalizing the fit on this class.
+
+```{r cache=TRUE, echo=FALSE}
+print("Number of Observations Per Workout Form")
+table(pretrain$classe)
+```
+
+Here are some Very Hungry Caterpillar-esque graphs relating user and exersice form to a few of the 
+various movements.
+
+```{r cache=TRUE}
+ggpairs(data=smaller, mapping=aes(color=classe, alpha=.5),columns=c(2:5))
+ggpairs(data=smaller, mapping=aes(color=classe),columns=c(6:9))
+ggpairs(data=smaller, mapping=aes(color=classe),columns=c(10:13))
+```
+
+
+```{r cache=TRUE}
+ggplot(data=pretrain,aes(x=total_accel_arm,y=total_accel_dumbbell))+
+    geom_jitter(colour=pretrain$raw_timestamp_part_1)+facet_grid(classe~user_name)
+```
+
+# Model Selection and Feature Selection
+
+One initial caveat is that we should not use user_name for predicting the new data. If we include user_name, the
+value of our model goes way down because it's not generalizable to people besides those 6 in the data set. If we 
+want to eventually turn this model into a data product, we can't have users specify their names and hope that 
+something about their name will give us predictive power. But in our data set, the name gives us extraordinary 
+predictive power. Take a gander at the graphs above for the roll_forearm and belt_pitch - every user has a specific frequency 
+associated with how they move their weight around. Of course, the variance of these is tight enough to 
+provide enough information without user names.
+
+##Baseline Model
+Our baseline model uses the chosen features and the defaults for the random forests algorithm.
+
+```{r cache=TRUE, message=FALSE}
+#modelFitInitail <- train(classe~roll_belt+pitch_belt+yaw_belt+total_accel_belt+
+#                           roll_arm+pitch_arm+yaw_arm+total_accel_arm+
+#                           roll_dumbbell+pitch_dumbbell+yaw_dumbbell+total_accel_dumbbell+
+#                           roll_forearm+pitch_forearm+yaw_forearm+total_accel_forearm, method='rf',
+#                         data=train)
+
+predsMFI <- predict(modelFitInitail,validation)
+x <- confusionMatrix(predsMFI,validation$classe)
+
+## We will not use this model below although it does very well!
+## Note that this method achieved 99.88% accuracy on the validation set. While not cross-validated,
+## this is pretty good for a first pass.
+#modelFitInitail2 <- train(classe~user_name+roll_belt+pitch_belt+yaw_belt+total_accel_belt+
+#                          roll_arm+pitch_arm+yaw_arm+total_accel_arm+
+#                           roll_dumbbell+pitch_dumbbell+yaw_dumbbell+total_accel_dumbbell+
+#                           roll_forearm+pitch_forearm+yaw_forearm+total_accel_forearm, method='rf',
+#                         data=train)
+
+#preds <- predict(modelFitInitail2,validation)
+#y <- confusionMatrix(preds,validation$classe)
+```
+
+Our in-sample error is 
+```{r cache=TRUE}
+predsMFIIS <- predict(modelFitInitail,training)
+confusionMatrix(predsMFIIS,training$classe)$overall[1]
+```
+while our out-of-sample error for the validation set is
+```{r}
+print(x$overall[1])
+```
+
+
+One interesting note on the model above is that the variable importance ranks the names of the users at the very
+end. We don't lose a ton of accuracy, and in fact, we have a pretty good model already.
+
+##Parameter search for Random Forests, Boosting, SVM, and Multinomial Regression Models
+
+###Random Forests Parameter Search
+
+Random Forests in Caret allows us to change mtry and the number of the trees. I will leave the number of trees at
+default since our original model did so well. We will choose an mtry parameter which gives us the highest accuracy.
+
+Note that we are using repeated cross-validation on the train set here, with 10 folds. We are simply trying to emulate the process
+by which we will eventually derive our statistic for the out-of-sample error on the test set. However, if we 
+increased our number
+of repeats, we would increase our risk of overfitting. We use the validation set to make sure this didn't happen.
+```{r cache=TRUE}
+
+## code adapted from http://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/
+
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="grid")
+grid <- expand.grid(.mtry=c(1:4))
+mtry <- 4 ## This is the maximum mtry (i.e. Sqrt(16) when we have 16 features)
+metric <- "Accuracy"
+#rf_random2 <- train(classe~roll_belt+pitch_belt+yaw_belt+total_accel_belt+
+#                           roll_arm+pitch_arm+yaw_arm+total_accel_arm+
+#                           roll_dumbbell+pitch_dumbbell+yaw_dumbbell+total_accel_dumbbell+
+#                          roll_forearm+pitch_forearm+yaw_forearm+total_accel_forearm, data=train, #method="rf", metric=metric, tuneGrid=grid, trControl=control)
+print(rf_random2$results)
+ggplot(rf_random2)
+```
+
+It appears the best parameter for Random Forests is mtry=3.
+
+```{r eval=FALSE}
+
+rfPred <- predict(rf_random, validation)
+rfAccuracy <- confusionMatrix(rfPred,validation$classe)
+
+rfAccuracy$overall
+```
+
+These are encouraging results! An out-of-sample error < in-sample error at .9883 is great.
+
+###Boosting (GBM) Parameter Search
+
+My computer has only 8GB of RAM which makes difficult the parameter search for this particular model.
+I have limited the interaction depth and number of trees, but the end result may not be tenable.
+```{r cache=TRUE, eval=FALSE}
+
+gbmGrid <- expand.grid(.interaction.depth = 6, .n.trees = 400*(1:10), 
+                       .shrinkage = c(.01,.05), .n.minobsinnode=10)
+```
+
+```{r cache=TRUE, message=FALSE}
+gbmGrid <- expand.grid(.interaction.depth = 6, .n.trees = c(2:4*1000), 
+                       .shrinkage = .05, .n.minobsinnode=10)
+control2 <- trainControl(method="repeatedcv", number=2, repeats=1, search="grid")
+
+#gbm_parametersearch <- train(classe~roll_belt+pitch_belt+yaw_belt+total_accel_belt+
+#                           roll_arm+pitch_arm+yaw_arm+total_accel_arm+
+#                           roll_dumbbell+pitch_dumbbell+yaw_dumbbell+total_accel_dumbbell+
+#                           roll_forearm+pitch_forearm+yaw_forearm+total_accel_forearm, data=train, method="gbm", metric=metric, tuneGrid=gbmGrid, trControl=control2,verbose=FALSE)
+
+predgbm<- predict(gbm_parametersearch, validation)
+confusionMatrix(predgbm,validation$classe)
+
+print(gbm_parametersearch$results)
+ggplot(gbm_parametersearch)
+```
+
+We therefore use 4000 trees, an interaction depth of 6, and shrinkage of .05. The accuracy is good, but 
+if we were to run the full parameter search, the model has a diminished rate of return per trees.
+
+###SVM 
+
+I haven't had good luck with svm yet, but I thought I would include it since it was covered in class. The tuning
+for this function is quite different from caret's built in tuning.
+
+```{r cache=TRUE, eval=FALSE}
+predictors <- subset(train,select = c(roll_belt,pitch_belt,yaw_belt,total_accel_belt,
+                           roll_arm,pitch_arm,yaw_arm,total_accel_arm,
+                           roll_dumbbell,pitch_dumbbell,yaw_dumbbell,total_accel_dumbbell,
+                           roll_forearm,pitch_forearm,yaw_forearm,total_accel_forearm))
+outcome <- subset(train,select= c(classe))
+
+
+svm_tune <- tune(svm, train.x=predictors, train.y=outcome$classe, 
+              kernel="radial", ranges=list(cost=c(1,50,100), gamma=(c(.5,1,1.5))))
+```
+
+```{r cache=TRUE}
+
+predictors.validation <- subset(validation,select = c(roll_belt,pitch_belt,yaw_belt,total_accel_belt,
+                           roll_arm,pitch_arm,yaw_arm,total_accel_arm,
+                           roll_dumbbell,pitch_dumbbell,yaw_dumbbell,total_accel_dumbbell,
+                           roll_forearm,pitch_forearm,yaw_forearm,total_accel_forearm))
+
+#svm_final <- svm(predictors,outcome$classe,cost=100,gamma=.5,kernal="radial")
+svmpreds <- predict(svm_final, predictors.validation)
+svmaccuracy <- predict(svm_final, predictors)
+confusionMatrix(svmpreds,validation$classe)
+confusionMatrix(svmaccuracy,train$classe)
+```
+
+
+
+###Multinomial Regression
+
+This is an example not covered in class, but would be a traditional way to model data from 5 classification
+categories. From one point of view, if this model fails, how robust are our simple inferences?
+
+Say I had two conditions which generated varying levels of the 5 classifications. I fit two multinomial models 
+to each and compare them using some sort of inferential test - chi-square or some comparison of variance. The 
+issue that arises is that my models may be non-robust. If they have a hard time predicting future values, I should
+be concerned about their inter-comparability. 
+
+```{r cache=TRUE, eval=FALSE}
+control3 <- trainControl(method="repeatedcv", number=10, repeats=5, search="random")
+
+mr_parametersearch <- train(classe~roll_belt+pitch_belt+yaw_belt+total_accel_belt+
+                           roll_arm+pitch_arm+yaw_arm+total_accel_arm+
+                           roll_dumbbell+pitch_dumbbell+yaw_dumbbell+total_accel_dumbbell+
+                           roll_forearm+pitch_forearm+yaw_forearm+total_accel_forearm, data=train, method="multinom", metric=metric, tuneLength=10, trControl=control3,verbose=FALSE)
+ggplot(mr_parametersearch)
+```
+
+```{r cache=TRUE}
+
+#mr_model <- train(classe~roll_belt+pitch_belt+yaw_belt+total_accel_belt+
+#                           roll_arm+pitch_arm+yaw_arm+total_accel_arm+
+#                           roll_dumbbell+pitch_dumbbell+yaw_dumbbell+total_accel_dumbbell+
+#                           roll_forearm+pitch_forearm+yaw_forearm+total_accel_forearm, data=train, #method="multinom", metric=metric, verbose=FALSE)
+
+ggplot(mr_model)
+
+predmr <- predict(mr_model,validation)
+confusionMatrix(predmr,validation$classe)
+```
+Let's just say that I'm not impressed. The weights actually brought down the accuracy. I suppose I could try to weight
+category A more, since it's more prominent but overall this is only marginally better than guessing.
+
+Although Random Forests, SVM, and Boosting were all very accurate, I turn to Random Forests for the final
+model, since they take the least time to fit.
+
+# Estimating the Out-of-Sample Accuracy
+
+We now have a model that seems to be well-validated and we want to establish a conjecture about its accuracy on the 
+testing set. 
+
+I proceed to do a random 5 fold cross-validation of my final model on the "pretrain" object, our undifferentiated
+training set that was used to train and evaluate the model.
+
+```{r cache=TRUE, messages=FALSE}
+
+kfold<- createFolds(pretrain$classe,5)
+
+#intialize variables
+results <- data.frame(matrix(ncol=7,nrow=5))
+trainfinal <- data.frame()
+validationfinal <- data.frame()
+grid2 <- expand.grid(.mtry=c(4))
+i <- 1
+#for(i in 1:5) {
+#  trainfinal <- pretrain[-kfold[[i]],]
+#  validationfinal <- pretrain[kfold[[i]],]
+  
+  ## build model
+#  rf_random <- train(classe~roll_belt+pitch_belt+yaw_belt+total_accel_belt+
+#                           roll_arm+pitch_arm+yaw_arm+total_accel_arm+
+#                           roll_dumbbell+pitch_dumbbell+yaw_dumbbell+total_accel_dumbbell+
+#                           roll_forearm+pitch_forearm+yaw_forearm+total_accel_forearm, data=trainfinal, #method="rf", metric=metric, tuneGrid=grid2, trControl=control)
+#  predfinal <- predict(rf_random,validationfinal)
+#  results[i,] <- confusionMatrix(predfinal,validationfinal$classe)$overall
+#}
+
+#rf_random <- train(classe~roll_belt+pitch_belt+yaw_belt+total_accel_belt+
+#                           roll_arm+pitch_arm+yaw_arm+total_accel_arm+
+#                           roll_dumbbell+pitch_dumbbell+yaw_dumbbell+total_accel_dumbbell+
+#                           roll_forearm+pitch_forearm+yaw_forearm+total_accel_forearm, data=pretrain, #method="rf", metric=metric, tuneGrid=grid2, trControl=control)
+
+predtest <- predict(rf_random,test)
+confusionMatrix(predtest,test$classe)
+
+
+predholdout <- predict(rf_random,testing)
+
+print(results[,1])
+```
+
+The first column of the results represents the estimates for our model's out-of-sample accuracy.
+When we compare these to the final accuracy, given by the confusion matrix above it, we see that the out-of-sample
+accuracy was actually slightly higher, but still within .3% of the accuracy with the pretrain model.
+
+#Conclusion
+
+With little effort, we were able to fit 3 robust models (random forests, boosting, and svm) to the WLE
+dataset. These models could be built into fitbit gear in the future, and give real-time advice to users
+about form issues. Further extensions would include more users, more forms, and different types of 
+exersizes. Integration with apps such as MyFitnessPal could enable users to upload their own data with
+'good' and 'bad' examples of exercise form, spawning a vast data lake for which the exercise community 
+would benefit.
+
+The multinomial regression was unfortunately innacurate and may serve as an example to dissuade others 
+from over-interpreting such models in future studies. In addition, perhaps the model was not appropriate
+for the study at hand, and it would of interest to find out why this might be.
+
